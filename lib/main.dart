@@ -1,8 +1,12 @@
 import 'package:flutter/material.dart';
+import 'package:intl/intl.dart';
+import 'package:intl/date_symbol_data_local.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
+import 'package:task_manager/calendar_page.dart';
 import 'package:task_manager/database_helper.dart';
 import 'package:timezone/data/latest.dart' as tz;
 import 'package:timezone/timezone.dart' as tz;
+
 
 
 
@@ -27,6 +31,7 @@ Future<void> initializeNotifications() async {
 }
 void main() async{
   WidgetsFlutterBinding.ensureInitialized();
+  await initializeDateFormatting('ja_jp', null);
   await initializeNotifications();
   runApp(const TaskApp());
 }
@@ -63,6 +68,7 @@ class AddTaskPage extends StatefulWidget {
 class _AddTaskPageState extends State<AddTaskPage> {
   final titleController = TextEditingController();
   final subjectController = TextEditingController();
+  final memoContoroller = TextEditingController();
   DateTime? deadline;
   TimeOfDay? deadlineTime;
 
@@ -71,23 +77,16 @@ class _AddTaskPageState extends State<AddTaskPage> {
 
     if(widget.task != null){
       final t = widget.task!;
+
       titleController.text = t['title'];
       subjectController.text = t['subject'];
 
-      final parts = t['deadline'].split(' ');
-      final dateParts = parts[0].split('/');
-      final timeParts = parts[1].split(':');
+      memoContoroller.text = t['memo'] ?? '';
 
-      deadline = DateTime(
-        2024,
-        int.parse(dateParts[0]),
-        int.parse(dateParts[1]),
-      );
+      final dt = DateTime.parse(t['deadline']);
 
-      deadlineTime = TimeOfDay(
-        hour: int.parse(timeParts[0]),
-        minute: int.parse(timeParts[1]),
-        );
+      deadline = DateTime(dt.year, dt.month, dt.day);
+      deadlineTime = TimeOfDay(hour: dt.hour, minute: dt.minute);
     }
   }
 
@@ -144,6 +143,17 @@ class _AddTaskPageState extends State<AddTaskPage> {
               ),
             ),
 
+            const SizedBox(height: 16),
+
+            TextField(
+              controller: memoContoroller,
+              maxLines: 4,
+              decoration: const InputDecoration(
+                labelText: 'メモ',
+                border: OutlineInputBorder(),
+              ),
+            ),
+
             const Spacer(),
 
             ElevatedButton(
@@ -166,15 +176,18 @@ class _AddTaskPageState extends State<AddTaskPage> {
                   deadlineTime!.minute,
                 );
 
+                final formattedDeadline = DateFormat('yyyy-MM-dd HH:mm').format(deadlineDateTime);
+
 
                 final taskData = {
+                  if(isEdit) 'id': widget.task!['id'],
                   'id': widget.task?['id'],
                   'title': titleController.text,
                   'subject': subjectController.text,
-                  'deadline':
-                      '${deadline!.month}/${deadline!.day} ${deadlineTime!.hour}:${deadlineTime!.minute.toString().padLeft(2, '0')}',
+                  'deadline': formattedDeadline,
                   'notificationId': deadlineDateTime.hashCode,
                   'isDone': widget.task?['isDone'] ?? 0,
+                  'memo': memoContoroller.text,
                 };
 
                 Navigator.pop(context, taskData);
@@ -196,6 +209,7 @@ class TaskListPage extends StatefulWidget {
 
 class _TaskListPageState extends State<TaskListPage> {
    List<Map<String, dynamic>> tasks = [];
+   String searchQuery = '';
    void initState() {
     super.initState();
     loadTasksFromDB();
@@ -215,7 +229,15 @@ class _TaskListPageState extends State<TaskListPage> {
 
     Future<void> updateTaskInDB(Map<String, dynamic> task) async{
       await DatabaseHelper.instance.updateTask(task);
+
+      await notifications.cancel(task['notificationId']);
+
+      if (task['isDone'] == 0) {
+        await scheduleTaskNotification(task);
+      }
+      
       await loadTasksFromDB();
+      setState(() {});
     }
 
     Future<void> deleteTaskFromDB(int id) async {
@@ -224,24 +246,10 @@ class _TaskListPageState extends State<TaskListPage> {
     }
 
     Future<void> scheduleTaskNotification(Map<String, dynamic> task) async {
-    final parts = task['deadline'].split(' ');
-    final dateParts = parts[0].split('/');
-    final timeParts = parts[1].split(':');
+    final date = DateTime.parse(task['deadline']);
+    final notifyDateTime = date.subtract(const Duration(days:1));
 
-    final month = int.parse(dateParts[0]);
-    final day = int.parse(dateParts[1]);
-    final hour = int.parse(timeParts[0]);
-    final minute = int.parse(timeParts[1]);
-
-    final deadlineDateTime = DateTime(
-      DateTime.now().year,
-      month,
-      day,
-      hour,
-      minute,
-    );
-
-    final notifyDateTime = deadlineDateTime.subtract(const Duration(days: 1));
+    if(notifyDateTime.isBefore(DateTime.now())) return;
 
     await notifications.zonedSchedule(
       task['notificationId'],
@@ -260,198 +268,78 @@ class _TaskListPageState extends State<TaskListPage> {
       androidScheduleMode: AndroidScheduleMode.exactAllowWhileIdle,
       uiLocalNotificationDateInterpretation:
           UILocalNotificationDateInterpretation.absoluteTime,
-      matchDateTimeComponents: DateTimeComponents.dateAndTime,
     );
   }
 
-
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(title: const Text('課題一覧')),
-
-      body: ListView.builder(
-        itemCount: tasks.length,
-        itemBuilder: (context, index) {
-          final task = tasks[index];
-
-          return Dismissible(
-            key: ValueKey(task['notificationId']),
-            direction: DismissDirection.endToStart,
-            background: Container(
-              color: Colors.red,
-              alignment: Alignment.centerRight,
-              padding: const EdgeInsets.symmetric(horizontal: 20),
-              child: const Icon(Icons.delete, color: Colors.indigo),
-            ),
-            onDismissed: (direction) async {
-              await deleteTaskFromDB(task['id']);
-            },
-            
-            child: buildTaskCard(task),
-          );
-        },
-      ),
-       floatingActionButton: FloatingActionButton(
-        onPressed:() async {
-          final newTask = await Navigator.push<Map<String, dynamic>>(
-            context,
-            MaterialPageRoute(builder: (_) => AddTaskPage())
-          );
-          if(newTask != null) {
-            await addTaskToDB(newTask);
-          }
-        },
-        child: const Icon(Icons.add),
-      ),
-    );
-  }
-       Widget buildTaskCard(Map<String, dynamic> task) {
-    final isDone = task['isDone'] == 1;
-
-    return Card(
-      elevation: 3,
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(16)
-      ),
-      margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-      child: InkWell(
-        borderRadius:BorderRadius.circular(16),
-        onTap:() async {
-          final updateTask = await Navigator.push(
-            context,
-            MaterialPageRoute(
-              builder:(_) => AddTaskPage(task: task),
-            ),
-          );
-
-          if (updateTask != null) {
-        await notifications.cancel(task['notificationId']);
-        await scheduleTaskNotification(updateTask);
-        await DatabaseHelper.instance.updateTask(updateTask);
-        await loadTasksFromDB();
-        setState(() {});
+  int daysLeft(String deadlineString) {
+    final deadline = DateTime.parse(deadlineString);
+    final now = DateTime.now();
+    final today = DateTime(now.year, now.month, now.day);
+    return deadline.difference(today).inDays;
       }
-    },
 
-    child: Padding(
-      padding: const EdgeInsets.all(16),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          GestureDetector(
-            onTap: () async {
-              final updatedTask = {
-                'id': task['id'],
-                'title': task['title'],
-                'subject': task['subject'],
-                'deadline': task['deadline'],
-                'notificationId': task['notificationId'],
-                'isDone': task['isDone'] == 1 ? 0 : 1,
-              };
-
-              if (updatedTask['isDone'] == 1) {
-                await notifications.cancel(task['notificationId']);
-              } else {
-                await scheduleTaskNotification(updatedTask);
-              }
-
-              await DatabaseHelper.instance.updateTask(updatedTask);
-              await loadTasksFromDB();
-              setState(() {});
-            },
-
-            child: Icon(
-                  isDone ? Icons.check_circle
-                  : Icons.radio_button_unchecked,
-              color: isDone ?  Colors.green : Colors.grey,
-              size: 28,
-            ),
-          ),
-
-          const SizedBox(width: 16),
-
-          Expanded(
-            child: Opacity(
-              opacity: task['isDone'] == 1 ? 0.5 : 1.0,
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                
-                  Text(
-                    task['title'],
-                    style: TextStyle(
-                      fontSize: 18,
-                      fontWeight: FontWeight.bold,
-                      decoration: task['isDone'] == 1
-                          ? TextDecoration.lineThrough
-                          : null,
-                    ),
-                  ),
-
-                  const SizedBox(height: 6),
-
-                  Text(
-                    task['subject'],
-                    style: TextStyle(
-                      fontSize: 14,
-                      color: Colors.blueGrey[600],
-                    ),
-                  ),
-
-                  const SizedBox(height: 6),
-
-
-                  Row(
-                    children: [
-                      Icon(Icons.access_time,
-                          size: 16, color: Colors.grey[600]),
-                      const SizedBox(width: 4),
-                      Text(
-                        task['deadline'],
-                        style: TextStyle(
-                          fontSize: 13,
-                          color: Colors.grey[600],
-                         ),
-                          ),
-                        ],
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-}
-    
-
-Widget buildTaskCard(Map<String, dynamic> task) {
+  Widget buildTaskCard(Map<String, dynamic> task) {
   final isDone = task['isDone'] == 1;
 
   return Card(
     elevation: 3,
+    color: isDone
+        ? Colors.grey[300]
+        : daysLeft(task['deadline']) <= 3
+            ? Colors.red[100]
+            : Colors.white,
     shape: RoundedRectangleBorder(
       borderRadius: BorderRadius.circular(16),
     ),
     margin: const EdgeInsets.symmetric(vertical: 8, horizontal: 12),
     child: InkWell(
       borderRadius: BorderRadius.circular(16),
-      onTap: () {
-       
+      onTap: () async {
+        final updatedTask = await Navigator.push(
+          context,
+          MaterialPageRoute(
+            builder: (_) => AddTaskPage(task: task),
+          ),
+        );
+
+        if (updatedTask != null) {
+          await updateTaskInDB(updatedTask);
+        }
       },
       child: Padding(
         padding: const EdgeInsets.all(16),
         child: Row(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Icon(
-              isDone ? Icons.check_circle : Icons.radio_button_unchecked,
-              color: isDone ? Colors.green : Colors.grey,
-              size: 28,
+
+            Container(
+              width:6,
+              height:60,
+              decoration: BoxDecoration(
+                color: isDone
+                   ? Colors.grey[300]
+                   : daysLeft(task['deadline']) <= 3
+                  ? Colors.red
+                  :Colors.blueGrey,
+                borderRadius:BorderRadius.circular(4),
+              ),
+            ),
+
+            const SizedBox(width: 12),
+            GestureDetector(
+              onTap: () async {
+                final updatedTask = {
+                  ...task,
+                  'isDone': isDone ? 0 : 1,
+                };
+
+                await updateTaskInDB(updatedTask);
+              },
+              child: Icon(
+                isDone ? Icons.check_circle : Icons.radio_button_unchecked,
+                color: isDone ? Colors.green : Colors.grey,
+                size: 28,
+              ),
             ),
             const SizedBox(width: 16),
             Expanded(
@@ -492,6 +380,16 @@ Widget buildTaskCard(Map<String, dynamic> task) {
                         ),
                       ],
                     ),
+                   const SizedBox(height: 4),
+
+                  Text(
+                    'あと ${daysLeft(task['deadline'])} 日',
+                     style: TextStyle(
+                     fontSize: 13,
+                     color: Colors.redAccent,
+                    fontWeight: FontWeight.bold,
+                     ),
+                   ),
                   ],
                 ),
               ),
@@ -501,5 +399,88 @@ Widget buildTaskCard(Map<String, dynamic> task) {
       ),
     ),
   );
+}
+
+  @override
+  Widget build(BuildContext context) {
+
+    final filteredTasks = tasks.where((task) {
+         final title = task['title'].toString();
+         final subject = task['subject']?.toString() ?? '';
+         return title.contains(searchQuery) || subject.contains(searchQuery);
+       }).toList();
+
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('課題一覧'),
+        bottom: PreferredSize(
+          preferredSize: const Size.fromHeight(48),
+          child:Padding(
+            padding:const EdgeInsets.all(8.0),
+            child:TextField(
+              decoration: const InputDecoration(
+                hintText: '検索(タイトル / 科目)',
+                prefixIcon: Icon(Icons.search),
+               border: OutlineInputBorder(),
+               filled: true,
+              ),
+              onChanged: (value) {
+                setState(() {
+                  searchQuery = value;
+                });
+              }            
+            ),
+          ),
+        ),
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.calendar_month),
+            onPressed:() {
+              Navigator.push(
+                context,
+                MaterialPageRoute(builder: (context)=> const CalendarPage()),
+                );
+            },
+          ),
+        ],
+      ),
+
+    
+
+      body: ListView.builder(
+        itemCount: filteredTasks.length,
+        itemBuilder: (context, index) {
+          final task = filteredTasks[index];
+          return Dismissible(
+            key: ValueKey(task['id']),
+            direction: DismissDirection.endToStart,
+            background: Container(
+              color: Colors.red,
+              alignment: Alignment.centerRight,
+              padding: const EdgeInsets.symmetric(horizontal: 20),
+              child: const Icon(Icons.delete, color: Colors.indigo),
+            ),
+            onDismissed: (direction) async {
+              await deleteTaskFromDB(task['id']);
+            },
+            
+            child: buildTaskCard(task),
+          );
+        },
+      ),
+       floatingActionButton: FloatingActionButton(
+        onPressed:() async {
+          final newTask = await Navigator.push<Map<String, dynamic>>(
+            context,
+            MaterialPageRoute(builder: (_) => AddTaskPage())
+          );
+          if(newTask != null) {
+            await addTaskToDB(newTask);
+          }
+        },
+        child: const Icon(Icons.add),
+      ),
+    );
+  }
 }
 

@@ -32,7 +32,8 @@ class DatabaseHelper {
         subject TEXT NOT NULL,
         deadline TEXT NOT NULL,
         notificationId INTEGER NOT NULL,
-        isDone INTEGER NOT NULL
+        isDone INTEGER NOT NULL,
+        memo TEXT 
       )
     ''');
   }
@@ -40,13 +41,18 @@ class DatabaseHelper {
   // INSERT
   Future<int> insertTask(Map<String, dynamic> task) async {
     final db = await instance.database;
+
+    task.remove('id');
     return await db.insert('tasks', task);
   }
 
   // SELECT
   Future<List<Map<String, dynamic>>> getTasks() async {
     final db = await instance.database;
-    return await db.query('tasks');
+    return await db.query(
+      'tasks',
+      orderBy: 'isDone ASC, deadline ASC'
+      );
   }
 
   // UPDATE
@@ -60,6 +66,7 @@ class DatabaseHelper {
         'deadline': task['deadline'],
         'notificationId': task['notificationId'],
         'isDone': task['isDone'],
+        'memo': task['memo'],
       },
       where: 'id = ?',
       whereArgs: [task['id']],
