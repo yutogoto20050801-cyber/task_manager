@@ -1,7 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:table_calendar/table_calendar.dart';
 import 'database_helper.dart';
-import 'dart:async';
+import 'package:intl/intl.dart';
+import 'add_task_page.dart';
 
 class CalendarPage extends StatefulWidget {
   const CalendarPage({super.key});
@@ -23,20 +24,25 @@ class _CalendarPageState extends State<CalendarPage> {
     loadTasks();
   }
 
+  DateTime parseDeadline(String value) {
+  return DateFormat('yyyy-MM-dd HH:mm').parse(value);
+}
+
   Future<void> loadTasks() async {
-    final tasks = await DatabaseHelper.instance.getTasks();
-    setState(() {
-      allTasks = tasks;
-      filterTasksForSelectedDay();
-    });
-  }
+  final tasks = await DatabaseHelper.instance.getTasks();
+
+  setState(() {
+    allTasks = tasks;
+    filterTasksForSelectedDay();
+  });
+}
 
   void filterTasksForSelectedDay() {
     if (_selectedDay == null) return;
 
     tasksForSelectedDay = allTasks.where((task) {
-      final deadline = DateTime.parse(task['deadline']);
-      return isSameDay(deadline, _selectedDay);
+       final deadline = parseDeadline(task['deadline']);
+       return isSameDay(deadline, _selectedDay);
     }).toList();
   }
 
@@ -66,7 +72,7 @@ class _CalendarPageState extends State<CalendarPage> {
             
             eventLoader: (day) {
               return allTasks.where((task) {
-                final deadline = DateTime.parse(task['deadline']);
+                final deadline = parseDeadline(task['deadline']);
                 return isSameDay(deadline, day);
               }).toList();
             },
@@ -102,20 +108,46 @@ class _CalendarPageState extends State<CalendarPage> {
                     itemCount: tasksForSelectedDay.length,
                     itemBuilder: (context, index) {
                       final task = tasksForSelectedDay[index];
-                      final deadline = DateTime.parse(task['deadline']);
+                      final deadline = parseDeadline(task['deadline']);
                       final left = daysLeft(deadline);
 
                       return Card(
                         margin: const EdgeInsets.symmetric(
                             horizontal: 16, vertical: 8),
-                        child: ListTile(
-                          title: Text(task['title']),
-                          subtitle: Text(
-                            "締め切り: ${deadline.year}/${deadline.month}/${deadline.day}\n"
-                            "あと $left 日",
-                          ),
-                          trailing: const Icon(Icons.chevron_right),
-                        ),
+                       child: ListTile(
+  title: Text(task['title']),
+  subtitle: Text(
+    "締め切り: ${deadline.year}/${deadline.month}/${deadline.day}\n"
+    "あと $left 日",
+  ),
+  trailing: const Icon(Icons.chevron_right),
+  onTap: () async {
+    final original = await DatabaseHelper.instance.getTaskById(task['id']);
+    if (original == null) return;
+
+    final result = await Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => AddTaskPage(task: original),
+      ),
+    );
+
+    if (result == "deleted") {
+      await loadTasks();
+      return;
+    }
+
+    if (result is Map<String, dynamic>) {
+      await DatabaseHelper.instance.updateTask(result);
+
+      if (result['repeatWeekly'] == 1) {
+        await DatabaseHelper.instance.generateWeeklyTasks();
+      }
+
+      await loadTasks();
+    }
+  },
+), 
                       );
                     },
                   ),

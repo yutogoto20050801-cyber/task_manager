@@ -1,3 +1,4 @@
+import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import 'package:intl/date_symbol_data_local.dart';
@@ -6,6 +7,9 @@ import 'package:task_manager/calendar_page.dart';
 import 'package:task_manager/database_helper.dart';
 import 'package:timezone/data/latest.dart' as tz;
 import 'package:timezone/timezone.dart' as tz;
+import 'add_task_page.dart';
+
+
 
 
 
@@ -17,21 +21,43 @@ final FlutterLocalNotificationsPlugin notifications =
 
 Future<void> initializeNotifications() async {
   const android = AndroidInitializationSettings('@mipmap/ic_launcher');
+
   const ios = DarwinInitializationSettings(
     requestAlertPermission: true,
     requestBadgePermission: true,
     requestSoundPermission: true,
   );
 
-  const settings = InitializationSettings(android: android, iOS: ios);
+  const settings = InitializationSettings(
+    android: android,
+    iOS: ios,
+  );
 
   await notifications.initialize(settings);
 
   tz.initializeTimeZones();
+  tz.setLocalLocation(tz.getLocation('Asia/Tokyo'));
+
+  final androidPlugin =
+      notifications.resolvePlatformSpecificImplementation<
+          AndroidFlutterLocalNotificationsPlugin>();
+
+  await androidPlugin?.requestNotificationsPermission();
+
+  final iosPlugin =
+      notifications.resolvePlatformSpecificImplementation<
+          IOSFlutterLocalNotificationsPlugin>();
+
+  await iosPlugin?.requestPermissions(
+    alert: true,
+    badge: true,
+    sound: true,
+  );
 }
+
 void main() async{
   WidgetsFlutterBinding.ensureInitialized();
-  await initializeDateFormatting('ja_jp', null);
+  await initializeDateFormatting('ja_JP', null);
   await initializeNotifications();
   runApp(const TaskApp());
 }
@@ -57,149 +83,6 @@ class TaskApp extends StatelessWidget {
   }
 }
 
-class AddTaskPage extends StatefulWidget {
-  final Map<String, dynamic>? task;
-  const AddTaskPage({super.key,this.task});
-
-  @override
-  State<AddTaskPage> createState() => _AddTaskPageState();
-}
-
-class _AddTaskPageState extends State<AddTaskPage> {
-  final titleController = TextEditingController();
-  final subjectController = TextEditingController();
-  final memoContoroller = TextEditingController();
-  DateTime? deadline;
-  TimeOfDay? deadlineTime;
-
-  void initState(){
-    super.initState();
-
-    if(widget.task != null){
-      final t = widget.task!;
-
-      titleController.text = t['title'];
-      subjectController.text = t['subject'];
-
-      memoContoroller.text = t['memo'] ?? '';
-
-      final dt = DateTime.parse(t['deadline']);
-
-      deadline = DateTime(dt.year, dt.month, dt.day);
-      deadlineTime = TimeOfDay(hour: dt.hour, minute: dt.minute);
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final isEdit = widget.task != null;
-    return Scaffold(
-      appBar: AppBar(
-        title: Text(isEdit ?'課題を編集' : '課題を追加')
-        ),
-      body: Padding(
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          children: [
-            TextField(
-              controller: titleController,
-              decoration: const InputDecoration(labelText: '課題名'),
-            ),
-            TextField(
-              controller: subjectController,
-              decoration: const InputDecoration(labelText: '科目'),
-            ),
-            const SizedBox(height: 16),
-
-            ElevatedButton(
-              onPressed: () async {
-                final picked = await showDatePicker(
-                  context: context,
-                  initialDate: DateTime.now(),
-                  firstDate: DateTime(2024),
-                  lastDate: DateTime(2030),
-                );
-                setState(() => deadline = picked);
-              },
-              child: Text(
-                deadline == null
-                    ? '締切日を選択'
-                    : '締切: ${deadline!.month}/${deadline!.day}',
-              ),
-            ),
-
-            ElevatedButton(
-              onPressed: () async {
-                final picked = await showTimePicker(
-                  context: context,
-                  initialTime: const TimeOfDay(hour: 23, minute: 59),
-                );
-                setState(() => deadlineTime = picked);
-              },
-              child: Text(
-                deadlineTime == null
-                    ? '締切時間を選択'
-                    : '時間: ${deadlineTime!.hour}:${deadlineTime!.minute.toString().padLeft(2, '0')}',
-              ),
-            ),
-
-            const SizedBox(height: 16),
-
-            TextField(
-              controller: memoContoroller,
-              maxLines: 4,
-              decoration: const InputDecoration(
-                labelText: 'メモ',
-                border: OutlineInputBorder(),
-              ),
-            ),
-
-            const Spacer(),
-
-            ElevatedButton(
-              onPressed: () async {
-                if (titleController.text.isEmpty ||
-                subjectController.text.isEmpty ||
-                deadline == null ||
-                deadlineTime == null) {
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(content: Text('すべての項目を入力してください')),
-                  );
-                  return;
-                }
-
-                final deadlineDateTime = DateTime(
-                  deadline!.year,
-                  deadline!.month,
-                  deadline!.day,
-                  deadlineTime!.hour,
-                  deadlineTime!.minute,
-                );
-
-                final formattedDeadline = DateFormat('yyyy-MM-dd HH:mm').format(deadlineDateTime);
-
-
-                final taskData = {
-                  if(isEdit) 'id': widget.task!['id'],
-                  'id': widget.task?['id'],
-                  'title': titleController.text,
-                  'subject': subjectController.text,
-                  'deadline': formattedDeadline,
-                  'notificationId': deadlineDateTime.hashCode,
-                  'isDone': widget.task?['isDone'] ?? 0,
-                  'memo': memoContoroller.text,
-                };
-
-                Navigator.pop(context, taskData);
-              },
-              child: Text(isEdit ? '更新' : '保存'),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
 class TaskListPage extends StatefulWidget {
   const TaskListPage({super.key});
 
@@ -208,24 +91,56 @@ class TaskListPage extends StatefulWidget {
 }
 
 class _TaskListPageState extends State<TaskListPage> {
+   Map<int, bool> animating = {};
    List<Map<String, dynamic>> tasks = [];
    String searchQuery = '';
+
+  @override
    void initState() {
     super.initState();
-    loadTasksFromDB();
+    loadTasksFromDB(); 
    }
-    Future<void>loadTasksFromDB() async {
-      final dbTasks = await DatabaseHelper.instance.getTasks();
-      setState(() {
-        tasks = dbTasks;
-      });
+
+@override
+    void didChangeDependencies() {
+      super.didChangeDependencies();
+      loadTasksFromDB();
     }
+  
+   Future<void> loadTasksFromDB() async {
+  final dbTasks = await DatabaseHelper.instance.getTasks();
+
+  setState(() {
+  final now = DateTime.now();
+  final today = DateTime(now.year, now.month, now.day);
+  final sevenDaysLater = today.add(const Duration(days: 7));
+
+  tasks = dbTasks.where((t) {
+    final repeat = t['repeat']?.toString() ?? 'none';
+
+    if (repeat != 'weekly') return true;
+
+    final deadline = DateFormat('yyyy-MM-dd HH:mm').parse(t['deadline']);
+    final taskDay = DateTime(deadline.year, deadline.month, deadline.day);
+
+    return !taskDay.isBefore(today) && !taskDay.isAfter(sevenDaysLater);
+  }).toList();
+});
+}
+
+  
+
 
     Future<void> addTaskToDB(Map<String,dynamic> task) async {
-      await DatabaseHelper.instance.insertTask(task);
-      await scheduleTaskNotification(task);
-      await loadTasksFromDB();
-    }
+  await DatabaseHelper.instance.insertTask(task);
+  await scheduleTaskNotification(task);
+
+  if (task['repeatWeekly'] == 1) {
+    await DatabaseHelper.instance.generateWeeklyTasks();
+  }
+
+  await loadTasksFromDB();
+}
 
     Future<void> updateTaskInDB(Map<String, dynamic> task) async{
       await DatabaseHelper.instance.updateTask(task);
@@ -236,6 +151,8 @@ class _TaskListPageState extends State<TaskListPage> {
         await scheduleTaskNotification(task);
       }
       
+      await DatabaseHelper.instance.generateWeeklyTasks();
+
       await loadTasksFromDB();
       setState(() {});
     }
@@ -278,34 +195,83 @@ class _TaskListPageState extends State<TaskListPage> {
     return deadline.difference(today).inDays;
       }
 
+      String deadlineLabel(String deadlineString) {
+  final left = daysLeft(deadlineString);
+
+  if (left < 0) {
+    return '${left.abs()}日遅れ';
+  }
+
+  if (left == 0) {
+    return '今日まで';
+  }
+
+  if (left == 1) {
+    return '明日まで';
+  }
+
+  return 'あと $left 日';
+}
+
+  Widget buildAnimatedTaskCard(Map<String, dynamic> task) {
+  return TweenAnimationBuilder(
+    tween: Tween<double>(begin: 0.8, end: 1.0),
+    duration: const Duration(milliseconds: 250),
+    curve: Curves.easeOut,
+    builder: (context, value, child) {
+      return Opacity(
+        opacity: value,
+        child: Transform.scale(
+          scale: value,
+          child: child,
+        ),
+      );
+    },
+    child: buildTaskCard(task), 
+  );
+}
+
+  
   Widget buildTaskCard(Map<String, dynamic> task) {
   final isDone = task['isDone'] == 1;
 
   return Card(
     elevation: 3,
     color: isDone
-        ? Colors.grey[300]
+    ? Colors.grey[300]
+    : daysLeft(task['deadline']) < 0
+        ? Colors.deepPurple[100]
         : daysLeft(task['deadline']) <= 3
             ? Colors.red[100]
-            : Colors.white,
+            : Colors.white, 
     shape: RoundedRectangleBorder(
       borderRadius: BorderRadius.circular(16),
     ),
     margin: const EdgeInsets.symmetric(vertical: 8, horizontal: 12),
     child: InkWell(
       borderRadius: BorderRadius.circular(16),
-      onTap: () async {
-        final updatedTask = await Navigator.push(
-          context,
-          MaterialPageRoute(
-            builder: (_) => AddTaskPage(task: task),
-          ),
-        );
+  onTap: () async {
+  final original = await DatabaseHelper.instance.getTaskById(task['id']);
+  if (original == null) return;
 
-        if (updatedTask != null) {
-          await updateTaskInDB(updatedTask);
-        }
-      },
+  final result = await Navigator.push(
+    context,
+    CupertinoPageRoute(
+      builder: (_) => AddTaskPage(task: original),
+    ),
+  );
+
+  if (result == "deleted") {
+    await loadTasksFromDB();
+    return;
+  }
+
+  if (result is Map<String, dynamic>) {
+  await updateTaskInDB(result);
+}
+},
+  
+
       child: Padding(
         padding: const EdgeInsets.all(16),
         child: Row(
@@ -317,10 +283,12 @@ class _TaskListPageState extends State<TaskListPage> {
               height:60,
               decoration: BoxDecoration(
                 color: isDone
-                   ? Colors.grey[300]
-                   : daysLeft(task['deadline']) <= 3
-                  ? Colors.red
-                  :Colors.blueGrey,
+                  ? Colors.grey[300]
+                 : daysLeft(task['deadline']) < 0
+                   ? Colors.deepPurple
+                  : daysLeft(task['deadline']) <= 3
+                    ? Colors.red
+                    : Colors.blueGrey,
                 borderRadius:BorderRadius.circular(4),
               ),
             ),
@@ -328,19 +296,36 @@ class _TaskListPageState extends State<TaskListPage> {
             const SizedBox(width: 12),
             GestureDetector(
               onTap: () async {
-                final updatedTask = {
-                  ...task,
-                  'isDone': isDone ? 0 : 1,
-                };
+                setState(() {
+                animating[task['id']] = true;
+                });
 
-                await updateTaskInDB(updatedTask);
-              },
+              await Future.delayed(const Duration(milliseconds: 80));
+
+              setState(() {
+               animating[task['id']] = false;
+              });
+
+              final updatedTask = {
+                ...task,
+                'isDone': isDone ? 0 : 1,
+              };
+
+              await updateTaskInDB(updatedTask);
+            },
+            child: AnimatedScale(
+              scale: animating[task['id']] == true ? 0.85 : 1.0,
+              duration: const Duration(milliseconds: 120),
+              curve: Curves.easeOut,
               child: Icon(
                 isDone ? Icons.check_circle : Icons.radio_button_unchecked,
                 color: isDone ? Colors.green : Colors.grey,
                 size: 28,
-              ),
+             ),
             ),
+           ),
+
+
             const SizedBox(width: 16),
             Expanded(
               child: Opacity(
@@ -383,12 +368,14 @@ class _TaskListPageState extends State<TaskListPage> {
                    const SizedBox(height: 4),
 
                   Text(
-                    'あと ${daysLeft(task['deadline'])} 日',
-                     style: TextStyle(
+                   deadlineLabel(task['deadline']),
+                   style: TextStyle(
                      fontSize: 13,
-                     color: Colors.redAccent,
-                    fontWeight: FontWeight.bold,
-                     ),
+                     color: daysLeft(task['deadline']) < 0
+                         ? Colors.deepPurple
+                         : Colors.redAccent,
+                     fontWeight: FontWeight.bold,
+                    ),
                    ),
                   ],
                 ),
@@ -435,13 +422,18 @@ class _TaskListPageState extends State<TaskListPage> {
         actions: [
           IconButton(
             icon: const Icon(Icons.calendar_month),
-            onPressed:() {
-              Navigator.push(
+            onPressed:() async {
+              await Navigator.push(
                 context,
-                MaterialPageRoute(builder: (context)=> const CalendarPage()),
+                CupertinoPageRoute(
+                  builder: (_) => const CalendarPage()
+                  ),
                 );
-            },
-          ),
+
+                await loadTasksFromDB();
+                setState(() {});
+              }, 
+            ),
         ],
       ),
 
@@ -464,7 +456,7 @@ class _TaskListPageState extends State<TaskListPage> {
               await deleteTaskFromDB(task['id']);
             },
             
-            child: buildTaskCard(task),
+            child: buildAnimatedTaskCard(task),
           );
         },
       ),
