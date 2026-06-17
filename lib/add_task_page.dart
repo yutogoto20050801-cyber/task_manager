@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
-import 'database_helper.dart'; 
-import 'main.dart';
+import 'database_helper.dart';
+import 'notification_service.dart';
 
 
 class AddTaskPage extends StatefulWidget {
@@ -18,8 +18,11 @@ class _AddTaskPageState extends State<AddTaskPage> {
   final memoContoroller = TextEditingController();
   DateTime? deadline;
   TimeOfDay? deadlineTime;
+  List<Map<String, dynamic>> reminders = [];
+  bool useDetailedReminders = false;
 
   bool repeatWeekly = false;
+  int notificationDaysBefore = 1;
 
   @override
   void initState() {
@@ -30,10 +33,20 @@ class _AddTaskPageState extends State<AddTaskPage> {
       titleController.text = t['title'];
       subjectController.text = t['subject'];
       memoContoroller.text = t['memo'] ?? '';
+      notificationDaysBefore = t['notificationDaysBefore'] ?? 1;
 
       final dt = DateTime.parse(t['deadline']);
       deadline = DateTime(dt.year, dt.month, dt.day);
       deadlineTime = TimeOfDay(hour: dt.hour, minute: dt.minute);
+
+        // load reminders for edit
+        () async {
+          final r = await DatabaseHelper.instance.getRemindersForTask(t['id']);
+          setState(() {
+            reminders = r;
+            useDetailedReminders = r.isNotEmpty;
+          });
+        }();
 
      if(t['repeat'] == 'weekly') {
       repeatWeekly = false;
@@ -41,6 +54,7 @@ class _AddTaskPageState extends State<AddTaskPage> {
       repeatWeekly = (t['repeatWeekly'] ?? 0) == 1;
      }      
     }
+    
   }
 
   @override
@@ -77,9 +91,9 @@ void dispose() {
                   actions: [
                     TextButton(
                       child: const Text("この予定だけ消す"),
-                      onPressed: () async {
-                        Navigator.pop(context); 
-                        await notifications.cancel(widget.task!['notificationId']);
+                        onPressed: () async {
+                        Navigator.pop(context);
+                        await NotificationService.cancelTaskNotification(widget.task!);
                         await DatabaseHelper.instance.deleteTask(id);
                         Navigator.pop(context, "deleted");
                       },
@@ -169,6 +183,104 @@ void dispose() {
                       ),
                     ),
 
+                    SwitchListTile(
+                      title: const Text('詳細リマインダーを使う'),
+                      value: useDetailedReminders,
+                      onChanged: (v) => setState(() => useDetailedReminders = v),
+                    ),
+                    if (!useDetailedReminders)
+                      DropdownButtonFormField<int>(
+                        value: notificationDaysBefore,
+                        decoration: const InputDecoration(labelText: '通知タイミング'),
+                        items: const [
+                          DropdownMenuItem(value: -1, child: Text('通知なし')),
+                          DropdownMenuItem(value: 0, child: Text('当日')),
+                          DropdownMenuItem(value: 1, child: Text('1日前')),
+                          DropdownMenuItem(value: 3, child: Text('3日前')),
+                          DropdownMenuItem(value: 7, child: Text('1週間前')),
+                        ],
+                        onChanged: (value) {
+                          if (value == null) return;
+                          setState(() {
+                            notificationDaysBefore = value;
+                          });
+                        },
+                      ),
+                    const SizedBox(height: 12),
+                    const Text('リマインダー'),
+                    const SizedBox(height: 8),
+                    if (useDetailedReminders) ...reminders.map((r) {
+                      final days = r['daysBefore'];
+                      final time = r['time'] ?? '09:00';
+                      return ListTile(
+                        title: Text('${days}日前 $time'),
+                        trailing: IconButton(
+                          icon: const Icon(Icons.delete),
+                          onPressed: () {
+                            setState(() {
+                              reminders.removeWhere((x) => x['id'] == r['id']);
+                            });
+                          },
+                        ),
+                      );
+                    }),
+                    if (useDetailedReminders)
+                      TextButton.icon(
+                      onPressed: () async {
+                        int selectedDays = 1;
+                        TimeOfDay selectedTime = const TimeOfDay(hour: 9, minute: 0);
+
+                        final days = await showDialog<int>(
+                          context: context,
+                          builder: (_) {
+                            int tmp = selectedDays;
+                            return AlertDialog(
+                              title: const Text('何日前に通知しますか？'),
+                              content: StatefulBuilder(
+                                builder: (_, st) {
+                                  return DropdownButton<int>(
+                                    value: tmp,
+                                    items: const [
+                                      DropdownMenuItem(value: 0, child: Text('当日')),
+                                      DropdownMenuItem(value: 1, child: Text('1日前')),
+                                      DropdownMenuItem(value: 3, child: Text('3日前')),
+                                      DropdownMenuItem(value: 7, child: Text('1週間前')),
+                                    ],
+                                    onChanged: (v) { if (v!=null) { tmp=v; st((){}); } },
+                                  );
+                                },
+                              ),
+                              actions: [
+                                TextButton(onPressed: () => Navigator.pop(context, null), child: const Text('キャンセル')),
+                                TextButton(onPressed: () => Navigator.pop(context, tmp), child: const Text('次へ')),
+                              ],
+                            );
+                          },
+                        );
+
+                        if (days == null) return;
+
+                        final pickedTime = await showTimePicker(
+                          context: context,
+                          initialTime: selectedTime,
+                        );
+
+                        if (pickedTime == null) return;
+
+                        setState(() {
+                          reminders.add({
+                            'daysBefore': days,
+                            'time': '${pickedTime.hour.toString().padLeft(2,'0')}:${pickedTime.minute.toString().padLeft(2,'0')}',
+                            'enabled': 1,
+                          });
+                        });
+                      },
+                      icon: const Icon(Icons.add),
+                      label: const Text('リマインダーを追加'),
+                    ),
+                    if (!useDetailedReminders)
+                      const SizedBox.shrink(),
+
                   SizedBox(
                     width: double.infinity,
                     child:Row(
@@ -229,6 +341,8 @@ void dispose() {
                  'memo': memoContoroller.text,
                  'repeat': 'none',
                  'repeatWeekly': repeatWeekly ? 1 : 0,
+                 'notificationDaysBefore': notificationDaysBefore,
+                 'reminders': useDetailedReminders ? reminders : [],
                 };
 
 

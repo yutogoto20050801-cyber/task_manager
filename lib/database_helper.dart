@@ -20,25 +20,31 @@ class DatabaseHelper {
 
   return await openDatabase(
     path,
-    version: 3,
+    version: 4,
     onCreate: _createDB,
     onUpgrade: (db, oldVersion, newVersion) async {
-      final columns = await db.rawQuery("PRAGMA table_info(tasks)");
-      final columnNames = columns.map((c) => c['name']).toList();
+  final columns = await db.rawQuery("PRAGMA table_info(tasks)");
+  final columnNames = columns.map((c) => c['name']).toList();
 
-      if (!columnNames.contains('repeat')) {
-        await db.execute(
-          "ALTER TABLE tasks ADD COLUMN repeat TEXT;",
-        );
-      }
+  if (!columnNames.contains('repeat')) {
+    await db.execute(
+      "ALTER TABLE tasks ADD COLUMN repeat TEXT;",
+    );
+  }
 
-      if (!columnNames.contains('repeatWeekly')) {
-        await db.execute(
-          "ALTER TABLE tasks ADD COLUMN repeatWeekly INTEGER NOT NULL DEFAULT 0;",
-        );
-      }
-    },
-  );
+  if (!columnNames.contains('repeatWeekly')) {
+    await db.execute(
+      "ALTER TABLE tasks ADD COLUMN repeatWeekly INTEGER NOT NULL DEFAULT 0;",
+    );
+  }
+
+  if (!columnNames.contains('notificationDaysBefore')) {
+    await db.execute(
+      "ALTER TABLE tasks ADD COLUMN notificationDaysBefore INTEGER NOT NULL DEFAULT 1;",
+    );
+  }  
+  },   
+);
 }
 
 
@@ -53,7 +59,20 @@ class DatabaseHelper {
         isDone INTEGER NOT NULL,
         memo TEXT,
         repeat TEXT,
-        repeatWeekly INTEGER NOT NULL DEFAULT 0
+        repeatWeekly INTEGER NOT NULL DEFAULT 0,
+        notificationDaysBefore INTEGER NOT NULL DEFAULT 1
+      )
+    ''');
+
+    await db.execute('''
+      CREATE TABLE reminders (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        taskId INTEGER NOT NULL,
+        daysBefore INTEGER NOT NULL,
+        time TEXT,
+        enabled INTEGER NOT NULL DEFAULT 1,
+        notificationId INTEGER,
+        FOREIGN KEY (taskId) REFERENCES tasks(id) ON DELETE CASCADE
       )
     ''');
   }
@@ -64,6 +83,57 @@ class DatabaseHelper {
 
     task.remove('id');
     return await db.insert('tasks', task);
+  }
+
+  // REMINDERS CRUD
+  Future<int> insertReminder(Map<String, dynamic> reminder) async {
+    final db = await instance.database;
+    reminder.remove('id');
+    return await db.insert('reminders', reminder);
+  }
+
+  Future<List<Map<String, dynamic>>> getRemindersForTask(int taskId) async {
+    final db = await instance.database;
+    return await db.query(
+      'reminders',
+      where: 'taskId = ?',
+      whereArgs: [taskId],
+      orderBy: 'daysBefore ASC, time ASC',
+    );
+  }
+
+  Future<int> updateReminder(Map<String, dynamic> reminder) async {
+    final db = await instance.database;
+    return await db.update(
+      'reminders',
+      {
+        'taskId': reminder['taskId'],
+        'daysBefore': reminder['daysBefore'],
+        'time': reminder['time'],
+        'enabled': reminder['enabled'],
+        'notificationId': reminder['notificationId'],
+      },
+      where: 'id = ?',
+      whereArgs: [reminder['id']],
+    );
+  }
+
+  Future<int> deleteRemindersByTaskId(int taskId) async {
+    final db = await instance.database;
+    return await db.delete(
+      'reminders',
+      where: 'taskId = ?',
+      whereArgs: [taskId],
+    );
+  }
+
+  Future<int> deleteReminder(int id) async {
+    final db = await instance.database;
+    return await db.delete(
+      'reminders',
+      where: 'id = ?',
+      whereArgs: [id],
+    );
   }
 
   // SELECT
@@ -89,6 +159,7 @@ class DatabaseHelper {
         'memo': task['memo'],
         'repeat': task['repeat'],
         'repeatWeekly': task['repeatWeekly'], 
+        'notificationDaysBefore': task['notificationDaysBefore'],
       },
       where: 'id = ?',
       whereArgs: [task['id']],
@@ -168,6 +239,7 @@ Future<void> generateWeeklyTasks() async {
           'isDone': 0,
           'repeat': 'weekly',
           'repeatWeekly': 0,
+          'notificationDaysBefore': task['notificationDaysBefore'] ?? 1,
         });
       }
 

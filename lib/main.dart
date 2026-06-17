@@ -2,12 +2,10 @@ import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import 'package:intl/date_symbol_data_local.dart';
-import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:task_manager/calendar_page.dart';
 import 'package:task_manager/database_helper.dart';
-import 'package:timezone/data/latest.dart' as tz;
-import 'package:timezone/timezone.dart' as tz;
 import 'add_task_page.dart';
+import 'notification_service.dart';
 
 
 
@@ -16,49 +14,12 @@ import 'add_task_page.dart';
 
 
 
-final FlutterLocalNotificationsPlugin notifications =
-    FlutterLocalNotificationsPlugin();
-
-Future<void> initializeNotifications() async {
-  const android = AndroidInitializationSettings('@mipmap/ic_launcher');
-
-  const ios = DarwinInitializationSettings(
-    requestAlertPermission: true,
-    requestBadgePermission: true,
-    requestSoundPermission: true,
-  );
-
-  const settings = InitializationSettings(
-    android: android,
-    iOS: ios,
-  );
-
-  await notifications.initialize(settings);
-
-  tz.initializeTimeZones();
-  tz.setLocalLocation(tz.getLocation('Asia/Tokyo'));
-
-  final androidPlugin =
-      notifications.resolvePlatformSpecificImplementation<
-          AndroidFlutterLocalNotificationsPlugin>();
-
-  await androidPlugin?.requestNotificationsPermission();
-
-  final iosPlugin =
-      notifications.resolvePlatformSpecificImplementation<
-          IOSFlutterLocalNotificationsPlugin>();
-
-  await iosPlugin?.requestPermissions(
-    alert: true,
-    badge: true,
-    sound: true,
-  );
-}
+// Notifications are handled by `NotificationService`.
 
 void main() async{
   WidgetsFlutterBinding.ensureInitialized();
   await initializeDateFormatting('ja_JP', null);
-  await initializeNotifications();
+  await NotificationService.initialize();
   runApp(const TaskApp());
 }
 
@@ -75,7 +36,7 @@ class TaskApp extends StatelessWidget {
           backgroundColor: Colors.white,
         ),
         checkboxTheme: CheckboxThemeData(
-          fillColor:WidgetStateProperty.all(Colors.white)
+          fillColor: MaterialStateProperty.all(Colors.white),
         )
         ),
       home: const TaskListPage(),
@@ -104,7 +65,6 @@ class _TaskListPageState extends State<TaskListPage> {
 @override
     void didChangeDependencies() {
       super.didChangeDependencies();
-      loadTasksFromDB();
     }
   
    Future<void> loadTasksFromDB() async {
@@ -132,8 +92,40 @@ class _TaskListPageState extends State<TaskListPage> {
 
 
     Future<void> addTaskToDB(Map<String,dynamic> task) async {
-  await DatabaseHelper.instance.insertTask(task);
-  await scheduleTaskNotification(task);
+  final reminders = (task['reminders'] as List?) ?? [];
+  task.remove('reminders');
+
+  final newId = await DatabaseHelper.instance.insertTask(task);
+
+  // persist reminders if any
+  if (reminders.isNotEmpty) {
+    for (var r in reminders) {
+      await DatabaseHelper.instance.insertReminder({
+        'taskId': newId,
+        'daysBefore': r['daysBefore'],
+        'time': r['time'],
+        'enabled': r['enabled'] ?? 1,
+        'notificationId': r['notificationId'],
+      });
+    }
+  }
+    else {
+      // If no detailed reminders provided, migrate single notificationDaysBefore into reminders
+      final daysBefore = task['notificationDaysBefore'];
+      if (daysBefore != null && daysBefore != -1) {
+        final nid = newId * 1000 + 0;
+        await DatabaseHelper.instance.insertReminder({
+          'taskId': newId,
+          'daysBefore': daysBefore,
+          'time': null,
+          'enabled': 1,
+          'notificationId': nid,
+        });
+      }
+    }
+
+  final taskWithId = {...task, 'id': newId};
+  await NotificationService.scheduleTaskNotification(taskWithId);
 
   if (task['repeatWeekly'] == 1) {
     await DatabaseHelper.instance.generateWeeklyTasks();
@@ -143,14 +135,46 @@ class _TaskListPageState extends State<TaskListPage> {
 }
 
     Future<void> updateTaskInDB(Map<String, dynamic> task) async{
+      final reminders = (task['reminders'] as List?) ?? [];
+
       await DatabaseHelper.instance.updateTask(task);
 
-      await notifications.cancel(task['notificationId']);
+      // cancel existing notifications (task + reminders)
+      await NotificationService.cancelTaskNotification(task);
+      await NotificationService.cancelRemindersForTask(task);
+
+      // replace reminders: remove existing then insert provided list,
+      // if no detailed reminders provided, migrate notificationDaysBefore into a single reminder
+      await DatabaseHelper.instance.deleteRemindersByTaskId(task['id']);
+
+      if (reminders.isNotEmpty) {
+        for (var r in reminders) {
+          await DatabaseHelper.instance.insertReminder({
+            'taskId': task['id'],
+            'daysBefore': r['daysBefore'],
+            'time': r['time'],
+            'enabled': r['enabled'] ?? 1,
+            'notificationId': r['notificationId'],
+          });
+        }
+      } else {
+        final daysBefore = task['notificationDaysBefore'];
+        if (daysBefore != null && daysBefore != -1) {
+          final nid = task['id'] * 1000 + 0;
+          await DatabaseHelper.instance.insertReminder({
+            'taskId': task['id'],
+            'daysBefore': daysBefore,
+            'time': null,
+            'enabled': 1,
+            'notificationId': nid,
+          });
+        }
+      }
 
       if (task['isDone'] == 0) {
-        await scheduleTaskNotification(task);
+        await NotificationService.scheduleTaskNotification(task);
       }
-      
+
       await DatabaseHelper.instance.generateWeeklyTasks();
 
       await loadTasksFromDB();
@@ -158,41 +182,27 @@ class _TaskListPageState extends State<TaskListPage> {
     }
 
     Future<void> deleteTaskFromDB(int id) async {
+      final task = await DatabaseHelper.instance.getTaskById(id);
+      if (task != null) {
+        await NotificationService.cancelTaskNotification(task);
+        await NotificationService.cancelRemindersForTask(task);
+      }
+      await DatabaseHelper.instance.deleteRemindersByTaskId(id);
       await DatabaseHelper.instance.deleteTask(id);
       await loadTasksFromDB();
     }
 
-    Future<void> scheduleTaskNotification(Map<String, dynamic> task) async {
-    final date = DateTime.parse(task['deadline']);
-    final notifyDateTime = date.subtract(const Duration(days:1));
-
-    if(notifyDateTime.isBefore(DateTime.now())) return;
-
-    await notifications.zonedSchedule(
-      task['notificationId'],
-      '締め切りが近いよ',
-      '${task['title']} の締め切りは明日だよ',
-      tz.TZDateTime.from(notifyDateTime, tz.local),
-      const NotificationDetails(
-        android: AndroidNotificationDetails(
-          'task_channel',
-          'Task Notification',
-          importance: Importance.max,
-          priority: Priority.high,
-        ),
-        iOS: DarwinNotificationDetails(),
-      ),
-      androidScheduleMode: AndroidScheduleMode.exactAllowWhileIdle,
-      uiLocalNotificationDateInterpretation:
-          UILocalNotificationDateInterpretation.absoluteTime,
-    );
-  }
+  // Notification scheduling now handled by NotificationService.
 
   int daysLeft(String deadlineString) {
-    final deadline = DateTime.parse(deadlineString);
-    final now = DateTime.now();
-    final today = DateTime(now.year, now.month, now.day);
-    return deadline.difference(today).inDays;
+    try {
+      final deadline = DateTime.parse(deadlineString);
+      final now = DateTime.now();
+      final today = DateTime(now.year, now.month, now.day);
+      return deadline.difference(today).inDays;
+    } catch (_) {
+      return 0;
+    }
       }
 
       String deadlineLabel(String deadlineString) {
@@ -234,16 +244,17 @@ class _TaskListPageState extends State<TaskListPage> {
   
   Widget buildTaskCard(Map<String, dynamic> task) {
   final isDone = task['isDone'] == 1;
+  final int leftDays = daysLeft(task['deadline']);
 
   return Card(
     elevation: 3,
     color: isDone
     ? Colors.grey[300]
-    : daysLeft(task['deadline']) < 0
-        ? Colors.deepPurple[100]
-        : daysLeft(task['deadline']) <= 3
-            ? Colors.red[100]
-            : Colors.white, 
+    : leftDays < 0
+      ? Colors.deepPurple[100]
+      : leftDays <= 3
+        ? Colors.red[100]
+        : Colors.white, 
     shape: RoundedRectangleBorder(
       borderRadius: BorderRadius.circular(16),
     ),
@@ -284,9 +295,9 @@ class _TaskListPageState extends State<TaskListPage> {
               decoration: BoxDecoration(
                 color: isDone
                   ? Colors.grey[300]
-                 : daysLeft(task['deadline']) < 0
+                 : leftDays < 0
                    ? Colors.deepPurple
-                  : daysLeft(task['deadline']) <= 3
+                  : leftDays <= 3
                     ? Colors.red
                     : Colors.blueGrey,
                 borderRadius:BorderRadius.circular(4),
@@ -394,7 +405,9 @@ class _TaskListPageState extends State<TaskListPage> {
     final filteredTasks = tasks.where((task) {
          final title = task['title'].toString();
          final subject = task['subject']?.toString() ?? '';
-         return title.contains(searchQuery) || subject.contains(searchQuery);
+         final q = searchQuery.trim().toLowerCase();
+         if (q.isEmpty) return true;
+         return title.toLowerCase().contains(q) || subject.toLowerCase().contains(q);
        }).toList();
 
     return Scaffold(
